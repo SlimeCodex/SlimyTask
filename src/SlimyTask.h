@@ -16,119 +16,213 @@
  * along with SlimyTask. If not, see <https://www.gnu.org/licenses/>.
  */
 
-#ifndef ___SLIMY_TASK_H___
-#define ___SLIMY_TASK_H___
+#pragma once
 
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include <functional>
+#include <cmath>
+
+// Enum to represent the type of task lifecycle event
+enum class TaskEvent {
+    START,
+    PAUSE,
+    RESUME,
+    STOP
+};
+
+// Enum to indicate before or after a lifecycle event
+enum class EventStage {
+    BEFORE,
+    AFTER
+};
+
+// Unified callback signature
+typedef void (*LifecycleCallback)(TaskEvent event, EventStage stage);
 
 class SlimyTask {
 private:
+    // Task management members
     TaskHandle_t xHandle = NULL;
     StaticTask_t xTaskBuffer;
-    StackType_t* xStack;
+    StackType_t* xStack = nullptr;
     size_t stackSize;
-    void (*taskFunction)(void* pvParameter);
     const char* taskName;
     UBaseType_t priority;
     BaseType_t core;
+
+    // Use static allocation for stack
+    static const size_t DEFAULT_STACK_SIZE = 4 * 1024;  // A default stack size to use
 
     // Monitoring variables
     uint32_t lastExecutionTimestamp = 0;
     uint32_t executionTime = 0;
     uint32_t loopCounter = 0;
     uint32_t m_executionEndTime = 0;
-
     uint32_t lastCheckTimestamp = 0;
     uint32_t lastLoopCounterAtCheck = 0;
     uint32_t freezeTimeout = 400;
 
+    // Optional unified callback function for task lifecycle events
+    LifecycleCallback lifecycleCallback = nullptr;
+
+    // User-defined setup and loop callbacks
+    std::function<void()> setupFunction = nullptr;
+    std::function<void()> loopFunction = nullptr;
+
+    // Programmable delay for the task loop
+    TickType_t loopDelayTicks = pdMS_TO_TICKS(10); // Default to 10 ms
+
 public:
-    SlimyTask(size_t _stackSize, void (*_taskFunction)(void*), const char* _taskName, UBaseType_t _priority, BaseType_t _core) : stackSize(_stackSize), taskFunction(_taskFunction), taskName(_taskName), priority(_priority), core(_core) {
-        xStack = new StackType_t[stackSize];
-    }
+    // Constructor with setup and loop callbacks
+    SlimyTask(size_t _stackSize, const char* _taskName, UBaseType_t _priority, BaseType_t _core,
+              std::function<void()> _setupFunction = nullptr, std::function<void()> _loopFunction = nullptr)
+        : stackSize(_stackSize), taskName(_taskName), priority(_priority), core(_core),
+          setupFunction(_setupFunction), loopFunction(_loopFunction) {
+        
+        // Check available heap space to decide whether the requested stack size is feasible
+        size_t freeHeap = heap_caps_get_free_size(MALLOC_CAP_INTERNAL);
 
-    ~SlimyTask() {
-        stop();
-        delete[] xStack;
-    }
+        // If stack size is more than available heap, set a warning and adjust it
+        if (stackSize > freeHeap) {
+            //Serial.printf("Warning: Requested stack size (%zu bytes) exceeds available internal heap (%zu bytes). Using available heap size instead.\n", stackSize, freeHeap);
+            stackSize = freeHeap - 512;  // Leave some space for other uses to avoid system instability
+        }
 
-    void start() {
-        if (xHandle == NULL) {
-            xHandle = xTaskCreateStaticPinnedToCore(taskFunction, taskName, stackSize, NULL, priority, xStack, &xTaskBuffer, core);
+        // If stack size is still too large, print error and use a default safe stack size
+        if (stackSize > freeHeap || stackSize <= 0) {
+            //Serial.printf("Error: Stack size adjustment failed. Using default stack size: %zu bytes.\n", DEFAULT_STACK_SIZE);
+            stackSize = DEFAULT_STACK_SIZE;
+        }
+
+        // Allocate the stack in internal memory explicitly to ensure proper alignment and type
+        xStack = static_cast<StackType_t*>(heap_caps_malloc(stackSize * sizeof(StackType_t), MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
+        
+        if (xStack == nullptr) {
+            //Serial.println("Failed to allocate stack memory - using static stack buffer instead.");
+            static StackType_t fallbackStaticStack[DEFAULT_STACK_SIZE];
+            xStack = fallbackStaticStack;
+            stackSize = DEFAULT_STACK_SIZE;  // Fall back to the default size
         }
     }
 
+    // Destructor
+    ~SlimyTask() {
+        stop();
+        if (xStack != nullptr) {
+            heap_caps_free(xStack);
+        }
+    }
+
+    // Set the loop delay
+    void setLoopDelay(uint32_t delayMs) {
+        loopDelayTicks = pdMS_TO_TICKS(delayMs);
+    }
+
+    // Start the task
+    void start() {
+        if (lifecycleCallback) {
+            lifecycleCallback(TaskEvent::START, EventStage::BEFORE);
+        }
+
+        if (xHandle == NULL && xStack != nullptr) {
+            xHandle = xTaskCreateStaticPinnedToCore(taskFunctionWrapper, taskName, stackSize / sizeof(StackType_t), this, priority, xStack, &xTaskBuffer, core);
+            if (xHandle == NULL) {
+                // Handle task creation failure if needed
+                //Serial.println("Failed to create task");
+            }
+        }
+
+        if (lifecycleCallback) {
+            lifecycleCallback(TaskEvent::START, EventStage::AFTER);
+        }
+    }
+
+    // Stop the task
     void stop() {
+        if (lifecycleCallback) {
+            lifecycleCallback(TaskEvent::STOP, EventStage::BEFORE);
+        }
+
         if (xHandle != NULL) {
             vTaskDelete(xHandle);
             xHandle = NULL;
         }
+
+        if (lifecycleCallback) {
+            lifecycleCallback(TaskEvent::STOP, EventStage::AFTER);
+        }
     }
 
+    // Pause the task
     void pause() {
+        if (lifecycleCallback) {
+            lifecycleCallback(TaskEvent::PAUSE, EventStage::BEFORE);
+        }
+
         if (xHandle != NULL) {
             vTaskSuspend(xHandle);
         }
-    }
 
-    void resume() {
-        if (xHandle != NULL) {
-            vTaskResume(xHandle);
+        if (lifecycleCallback) {
+            lifecycleCallback(TaskEvent::PAUSE, EventStage::AFTER);
         }
     }
 
-    bool isRunning() {
-        return (xHandle != NULL && eTaskGetState(xHandle) != eSuspended);
+    // Resume the task
+    void resume() {
+        if (lifecycleCallback) {
+            lifecycleCallback(TaskEvent::RESUME, EventStage::BEFORE);
+        }
+
+        if (xHandle != NULL) {
+            vTaskResume(xHandle);
+        }
+
+        if (lifecycleCallback) {
+            lifecycleCallback(TaskEvent::RESUME, EventStage::AFTER);
+        }
     }
 
+    // Restart the task
     void restart() {
         stop();
         start();
     }
 
-    bool isBusy() {
-        uint32_t currentTimestamp = millis();
+    // Static task function wrapper
+    static void taskFunctionWrapper(void* pvParameter) {
+        SlimyTask* task = static_cast<SlimyTask*>(pvParameter);
 
-        if (loopCounter == lastLoopCounterAtCheck && (currentTimestamp - lastCheckTimestamp) > freezeTimeout) {
-            return true;
+        // Run the setup function once if provided
+        if (task->setupFunction != nullptr) {
+            task->setupFunction();
         }
 
-        lastCheckTimestamp = currentTimestamp;
-        lastLoopCounterAtCheck = loopCounter;
+        // Enter the loop
+        while (1) {
+            // Start tracking execution time
+            task->startExecution();
 
-        return false;
-    }
+            // Run the user-provided loop function
+            if (task->loopFunction != nullptr) {
+                task->loopFunction();
+            }
 
-    TaskHandle_t getTaskHandle() {
-        return xHandle;
-    }
+            // End tracking execution time
+            task->endExecution();
 
-    UBaseType_t getStackHighWaterMark() {
-        if (xHandle != NULL) {
-            return uxTaskGetStackHighWaterMark(xHandle);
-        }
-        return 0;
-    }
-
-    void sendNotification(uint32_t value, eNotifyAction action = eSetValueWithOverwrite) {
-        if (xHandle != NULL) {
-            xTaskNotify(xHandle, value, action);
+            // Delay to yield CPU to other tasks, allowing for configurable delay
+            vTaskDelay(task->loopDelayTicks);
         }
     }
 
-    uint32_t receiveNotification(TickType_t waitTicks = portMAX_DELAY) {
-        uint32_t notificationValue = 0;
-        if (xHandle != NULL) {
-            xTaskNotifyWait(0, 0, &notificationValue, waitTicks);
-        }
-        return notificationValue;
-    }
-
+    // Start tracking execution time
     void startExecution() {
         lastExecutionTimestamp = millis();
     }
 
+    // End tracking execution time
     void endExecution() {
         uint32_t currentTimestamp = millis();
         executionTime = currentTimestamp - lastExecutionTimestamp;
@@ -137,22 +231,101 @@ public:
         m_executionEndTime = xTaskGetTickCount();
     }
 
+    // Set unified callback function for task lifecycle events
+    void setLifecycleCallback(LifecycleCallback callback) {
+        lifecycleCallback = callback;
+    }
+
+    // Getter for Execution Time
     uint32_t getExecutionTime() const {
         return executionTime;
     }
 
+    // Getter for Loops per Second
+    float getLoopsPerSecond() const {
+        return executionTime > 0 ? 1000.0f / static_cast<float>(executionTime) : 0.0f;
+    }
+
+    // Getter for Available Stack Percentage
+    int getAvailableStackPercentage() const {
+        if (xHandle != NULL) {
+            UBaseType_t stackDepth = uxTaskGetStackHighWaterMark(xHandle);
+            return static_cast<int>(100 - std::floor((static_cast<float>(stackDepth) / stackSize) * 100.0));
+        }
+        return 0;
+    }
+
+    // Getter for Stack High Water Mark
+    UBaseType_t getStackHighWaterMark() const {
+        return (xHandle != NULL) ? uxTaskGetStackHighWaterMark(xHandle) : 0;
+    }
+    
+    // Check if the task is currently running
+    bool isRunning() const {
+        return (xHandle != NULL && eTaskGetState(xHandle) == eRunning);
+    }
+
+    // Check if the task is currently ready
+    bool isReady() const {
+        return (xHandle != NULL && eTaskGetState(xHandle) == eReady);
+    }
+
+    // Check if the task is currently blocked
+    bool isBlocked() const {
+        return (xHandle != NULL && eTaskGetState(xHandle) == eBlocked);
+    }
+
+    // Check if the task is currently suspended
+    bool isSuspended() const {
+        return (xHandle != NULL && eTaskGetState(xHandle) == eSuspended);
+    }
+
+    // Check if the task has been deleted
+    bool isDeleted() const {
+        return (xHandle != NULL && eTaskGetState(xHandle) == eDeleted);
+    }
+
+    // Check if the task state is invalid (e.g., task handle is NULL)
+    bool isInvalid() const {
+        return (xHandle == NULL || eTaskGetState(xHandle) == eInvalid);
+    }
+
+    // Getter for Task Name
     const char* getTaskName() const {
         return taskName;
     }
 
-    int getAvailableStackPercentage() const {
-        const UBaseType_t stackDepth = uxTaskGetStackHighWaterMark(xHandle);
-        return 100 - floor((static_cast<float>(stackDepth) / stackSize) * 100.0);
+    // Getter for Current Stack Usage
+    size_t getCurrentStackUsage() const {
+        if (xHandle != NULL) {
+            UBaseType_t stackDepth = uxTaskGetStackHighWaterMark(xHandle);
+            return stackSize - stackDepth * sizeof(StackType_t);
+        }
+        return 0;
     }
 
-    float getLoopsPerSecond() {
-        return executionTime > 0 ? 1000.0f / executionTime : 0.0f;
+    // Getter for Total Heap Size
+    size_t getTotalHeap() const {
+        return heap_caps_get_total_size(MALLOC_CAP_INTERNAL);
+    }
+
+    // Getter for Available Heap Size
+    size_t getFreeHeap() const {
+        return heap_caps_get_free_size(MALLOC_CAP_INTERNAL);
+    }
+
+    // Getter for Used Heap Size
+    size_t getUsedHeap() const {
+        return getTotalHeap() - getFreeHeap();
+    }
+
+    // Estimate CPU Usage by Calculating Time Spent in Loop
+    float getTaskCpuUsageEstimate() const {
+        if (executionTime > 0 && loopDelayTicks > 0) {
+            // Estimation: (execution time) / (execution time + delay)
+            float totalLoopTimeMs = executionTime + loopDelayTicks * portTICK_PERIOD_MS;
+            return (executionTime / totalLoopTimeMs) * 100.0f;
+        }
+        return 0.0f;
     }
 };
-
-#endif // ___SLIMY_TASK_H___
