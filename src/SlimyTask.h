@@ -20,6 +20,7 @@
 
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "esp_task_wdt.h"  // Include the Watchdog Timer library
 #include <functional>
 #include <cmath>
 
@@ -51,8 +52,8 @@ private:
     UBaseType_t priority;
     BaseType_t core;
 
-    // Use static allocation for stack
-    static const size_t DEFAULT_STACK_SIZE = 4 * 1024;  // A default stack size to use
+    // Default stack size
+    static const size_t DEFAULT_STACK_SIZE = 4 * 1024;
 
     // Monitoring variables
     uint32_t lastExecutionTimestamp = 0;
@@ -63,46 +64,45 @@ private:
     uint32_t lastLoopCounterAtCheck = 0;
     uint32_t freezeTimeout = 400;
 
-    // Optional unified callback function for task lifecycle events
+    // Optional unified callback function
     LifecycleCallback lifecycleCallback = nullptr;
 
     // User-defined setup and loop callbacks
     std::function<void()> setupFunction = nullptr;
     std::function<void()> loopFunction = nullptr;
 
+    // Optional pre- and post-setup and loop callbacks
+    std::function<void()> preSetupCallback = nullptr;
+    std::function<void()> postSetupCallback = nullptr;
+    std::function<void()> preLoopCallback = nullptr;
+    std::function<void()> postLoopCallback = nullptr;
+
     // Programmable delay for the task loop
-    TickType_t loopDelayTicks = pdMS_TO_TICKS(10); // Default to 10 ms
+    TickType_t loopDelayTicks;
 
 public:
-    // Constructor with setup and loop callbacks
+    // Constructor with setup, loop, optional delay, and optional pre/post callbacks
     SlimyTask(size_t _stackSize, const char* _taskName, UBaseType_t _priority, BaseType_t _core,
-              std::function<void()> _setupFunction = nullptr, std::function<void()> _loopFunction = nullptr)
+              std::function<void()> _setupFunction = nullptr, std::function<void()> _loopFunction = nullptr,
+              uint32_t delayMs = 10)  // Optional delay parameter with a default value
         : stackSize(_stackSize), taskName(_taskName), priority(_priority), core(_core),
           setupFunction(_setupFunction), loopFunction(_loopFunction) {
         
-        // Check available heap space to decide whether the requested stack size is feasible
+        loopDelayTicks = pdMS_TO_TICKS(delayMs);  // Set initial delay in ticks
+
+        // Memory and stack management
         size_t freeHeap = heap_caps_get_free_size(MALLOC_CAP_INTERNAL);
-
-        // If stack size is more than available heap, set a warning and adjust it
         if (stackSize > freeHeap) {
-            //Serial.printf("Warning: Requested stack size (%zu bytes) exceeds available internal heap (%zu bytes). Using available heap size instead.\n", stackSize, freeHeap);
-            stackSize = freeHeap - 512;  // Leave some space for other uses to avoid system instability
+            stackSize = freeHeap - 512;
         }
-
-        // If stack size is still too large, print error and use a default safe stack size
         if (stackSize > freeHeap || stackSize <= 0) {
-            //Serial.printf("Error: Stack size adjustment failed. Using default stack size: %zu bytes.\n", DEFAULT_STACK_SIZE);
             stackSize = DEFAULT_STACK_SIZE;
         }
-
-        // Allocate the stack in internal memory explicitly to ensure proper alignment and type
         xStack = static_cast<StackType_t*>(heap_caps_malloc(stackSize * sizeof(StackType_t), MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
-        
         if (xStack == nullptr) {
-            //Serial.println("Failed to allocate stack memory - using static stack buffer instead.");
             static StackType_t fallbackStaticStack[DEFAULT_STACK_SIZE];
             xStack = fallbackStaticStack;
-            stackSize = DEFAULT_STACK_SIZE;  // Fall back to the default size
+            stackSize = DEFAULT_STACK_SIZE;
         }
     }
 
@@ -114,9 +114,31 @@ public:
         }
     }
 
-    // Set the loop delay
+    // Set the loop delay dynamically
     void setLoopDelay(uint32_t delayMs) {
         loopDelayTicks = pdMS_TO_TICKS(delayMs);
+    }
+
+    // Configure the Watchdog Timer
+    void configWatchdogTimer(uint32_t timeoutSeconds, bool panicOnTrigger = false) {
+        esp_task_wdt_init(timeoutSeconds, panicOnTrigger);
+    }
+
+    // Set individual callbacks
+    void setPreSetupCallback(std::function<void()> callback) {
+        preSetupCallback = callback;
+    }
+
+    void setPostSetupCallback(std::function<void()> callback) {
+        postSetupCallback = callback;
+    }
+
+    void setPreLoopCallback(std::function<void()> callback) {
+        preLoopCallback = callback;
+    }
+
+    void setPostLoopCallback(std::function<void()> callback) {
+        postLoopCallback = callback;
     }
 
     // Start the task
@@ -129,7 +151,6 @@ public:
             xHandle = xTaskCreateStaticPinnedToCore(taskFunctionWrapper, taskName, stackSize / sizeof(StackType_t), this, priority, xStack, &xTaskBuffer, core);
             if (xHandle == NULL) {
                 // Handle task creation failure if needed
-                //Serial.println("Failed to create task");
             }
         }
 
@@ -194,13 +215,28 @@ public:
     static void taskFunctionWrapper(void* pvParameter) {
         SlimyTask* task = static_cast<SlimyTask*>(pvParameter);
 
+        // Run pre-setup callback if defined
+        if (task->preSetupCallback) {
+            task->preSetupCallback();
+        }
+
         // Run the setup function once if provided
         if (task->setupFunction != nullptr) {
             task->setupFunction();
         }
 
+        // Run post-setup callback if defined
+        if (task->postSetupCallback) {
+            task->postSetupCallback();
+        }
+
         // Enter the loop
         while (1) {
+            // Run pre-loop callback if defined
+            if (task->preLoopCallback) {
+                task->preLoopCallback();
+            }
+
             // Start tracking execution time
             task->startExecution();
 
@@ -211,6 +247,11 @@ public:
 
             // End tracking execution time
             task->endExecution();
+
+            // Run post-loop callback if defined
+            if (task->postLoopCallback) {
+                task->postLoopCallback();
+            }
 
             // Delay to yield CPU to other tasks, allowing for configurable delay
             vTaskDelay(task->loopDelayTicks);
@@ -227,7 +268,6 @@ public:
         uint32_t currentTimestamp = millis();
         executionTime = currentTimestamp - lastExecutionTimestamp;
         loopCounter++;
-
         m_executionEndTime = xTaskGetTickCount();
     }
 
@@ -241,9 +281,9 @@ public:
         return executionTime;
     }
 
-    // Getter for Loops per Second
-    float getLoopsPerSecond() const {
-        return executionTime > 0 ? 1000.0f / static_cast<float>(executionTime) : 0.0f;
+    // Getter for Loops per Second as an integer (rounded)
+    int getLoopsPerSecond() const {
+        return executionTime > 0 ? static_cast<int>(1000 / executionTime) : 0;
     }
 
     // Getter for Available Stack Percentage
@@ -319,13 +359,13 @@ public:
         return getTotalHeap() - getFreeHeap();
     }
 
-    // Estimate CPU Usage by Calculating Time Spent in Loop
-    float getTaskCpuUsageEstimate() const {
+    // Estimate CPU Usage by Calculating Time Spent in Loop as an integer percentage (0 to 100)
+    int getTaskCpuUsageEstimate() const {
         if (executionTime > 0 && loopDelayTicks > 0) {
             // Estimation: (execution time) / (execution time + delay)
-            float totalLoopTimeMs = executionTime + loopDelayTicks * portTICK_PERIOD_MS;
-            return (executionTime / totalLoopTimeMs) * 100.0f;
+            uint32_t totalLoopTimeMs = executionTime + loopDelayTicks * portTICK_PERIOD_MS;
+            return static_cast<int>((executionTime * 100) / totalLoopTimeMs);
         }
-        return 0.0f;
+        return 0;
     }
 };
