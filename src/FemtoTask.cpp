@@ -188,3 +188,50 @@ int FemtoTask::getTaskCpuUsageEstimate() const {
 	}
 	return 0;
 }
+
+// Set the loop delay dynamically
+void FemtoTask::setLoopDelay(uint32_t delayMs) {
+	loopDelayTicks = pdMS_TO_TICKS(delayMs);
+}
+
+// Configure the Watchdog Timer
+void FemtoTask::configWatchdogTimer(uint32_t timeoutSeconds, bool panicOnTrigger) {
+	esp_task_wdt_init(timeoutSeconds, panicOnTrigger);
+}
+
+// Set individual callbacks
+void FemtoTask::setPreSetupCallback(std::function<void()> callback) {
+	preSetupCallback = callback;
+}
+
+void FemtoTask::setPostSetupCallback(std::function<void()> callback) {
+	postSetupCallback = callback;
+}
+
+void FemtoTask::setPreLoopCallback(std::function<void()> callback) {
+	preLoopCallback = callback;
+}
+
+void FemtoTask::setPostLoopCallback(std::function<void()> callback) {
+	postLoopCallback = callback;
+}
+
+// Pause the task
+void FemtoTask::pause() {
+    if (handle) {
+        vTaskSuspend(handle);
+    }
+}
+
+// Resume the task
+void FemtoTask::resume() {
+    if (handle) {
+        vTaskResume(handle);
+    }
+}
+
+// Restart the task
+void FemtoTask::restart() {
+	stop();
+	start();
+}
