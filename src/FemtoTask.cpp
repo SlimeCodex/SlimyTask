@@ -102,6 +102,11 @@ void FemtoTask::setLifecycleCallback(LifecycleCallback callback) {
 	lifecycleCallback = callback;
 }
 
+// Return task name
+const char* FemtoTask::getTaskName() const {
+    return name;
+}
+
 // Task state helpers
 bool FemtoTask::isRunning() const {
 	return handle && eTaskGetState(handle) == eRunning;
