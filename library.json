@@ -3,7 +3,7 @@
     "description": "Task, mutex and buffer management for ESP32 with FreeRTOS.",
     "version": "1.0.0",
     "authors": {
-        "name": "Alejandro Nicolini",
+        "name": "SlimeCodex",
         "email": "slimecodex@gmail.com"
     },
     "repository": {

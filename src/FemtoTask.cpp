@@ -1,7 +1,7 @@
 /*
  * FemtoTask.cpp
  * Part of FemtoTask Library.
- * Copyright (C) 2023 Alejandro Nicolini
+ * Copyright (C) 2023 SlimeCodex
  *
  * Licensed under GNU GPL v3 or later. See <https://www.gnu.org/licenses/>.
  */

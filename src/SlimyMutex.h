@@ -1,6 +1,6 @@
 /*
  * This file is part of SlimyTask Library.
- * Copyright (C) 2023 Alejandro Nicolini
+ * Copyright (C) 2023 SlimeCodex
  *
  * SlimyTask is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
